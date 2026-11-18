@@ -1,0 +1,38 @@
+[package]
+name = "rust-screen"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+description = "Windows screen capture with configurable global shortcuts"
+license = "MIT"
+# `cargo run` starts the GUI; the MCP server is `cargo run --bin rust-screen-mcp`.
+default-run = "rust-screen"
+
+[dependencies]
+ab_glyph = "0.2"
+tiny-skia = { version = "0.11", default-features = false, features = ["std", "simd"] }
+arboard = "3.7"
+base64 = "0.22"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+eframe = { version = "0.33.3", default-features = false, features = ["default_fonts", "glow"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+raw-window-handle = "0.6"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Graphics_Dwm", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_HiDpi", "Win32_System_LibraryLoader", "Win32_System_Threading", "Win32_Security", "Win32_UI_Shell", "Win32_Storage_Xps"] }
+
+[profile.release]
+# Fat LTO with one codegen unit gives the smallest, fastest binary for a slower build.
+# Keep the default `panic = "unwind"`: background jobs report a panic as an error
+# (see check_job) instead of terminating the app.
+lto = "fat"
+codegen-units = 1
+strip = true
+
+# Image scaling, PNG encoding and rasterisation are very slow unoptimised; optimise
+# dependencies in debug builds while keeping this crate quick to rebuild and debug.
+[profile.dev.package."*"]
+opt-level = 2
+

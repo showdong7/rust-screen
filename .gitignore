@@ -1,0 +1,6 @@
+/target/
+/dist/
+/screenshots/
+*.tmp
+
+AGENTS.md
