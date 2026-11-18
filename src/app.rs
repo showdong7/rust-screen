@@ -60,7 +60,13 @@ pub struct ScreenApp {
     pending_action: Option<PendingAction>,
     after_save: Option<PendingAction>,
     logo: egui::TextureHandle,
+    show_about: bool,
 }
+
+/// Shown in the About dialog.
+const APP_VERSION: &str = "V0.9 beta";
+const WEBSITE_URL: &str = "https://rust-screen.fujin365.cc/";
+const GITHUB_URL: &str = "https://github.com/showdong7/rust-screen";
 
 /// Header logo height in points, next to the 23 pt "RUST SCREEN" title.
 const LOGO_SIZE: f32 = 32.0;
@@ -138,6 +144,7 @@ impl ScreenApp {
             pending_action: None,
             after_save: None,
             logo: load_logo(&cc.egui_ctx),
+            show_about: false,
         }
     }
 
@@ -194,6 +201,49 @@ impl ScreenApp {
         match action {
             PendingAction::Capture(target) => self.capture(ctx, target),
             PendingAction::Exit => self.request_exit(ctx),
+        }
+    }
+
+    fn about_dialog(&mut self, ctx: &egui::Context) {
+        if !self.show_about {
+            return;
+        }
+        let mut close = false;
+        let response = egui::Modal::new(egui::Id::new("about")).show(ctx, |ui| {
+            let colors = Palette::for_ui(ui);
+            ui.set_width(340.0);
+            ui.horizontal(|ui| {
+                ui.add(egui::Image::new((self.logo.id(), Vec2::splat(LOGO_SIZE))));
+                ui.label(
+                    RichText::new("RUST SCREEN")
+                        .size(20.0)
+                        .strong()
+                        .color(colors.accent),
+                );
+            });
+            ui.label(RichText::new("螢幕截圖工具").color(colors.muted));
+            ui.add_space(10.0);
+            egui::Grid::new("about_info")
+                .num_columns(2)
+                .spacing([14.0, 8.0])
+                .show(ui, |ui| {
+                    ui.label(RichText::new("版本").strong());
+                    ui.label(APP_VERSION);
+                    ui.end_row();
+                    ui.label(RichText::new("官網").strong());
+                    ui.hyperlink_to(WEBSITE_URL, WEBSITE_URL);
+                    ui.end_row();
+                    ui.label(RichText::new("GitHub").strong());
+                    ui.hyperlink_to(GITHUB_URL, GITHUB_URL);
+                    ui.end_row();
+                });
+            ui.add_space(12.0);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                close = ui.button("關閉").clicked();
+            });
+        });
+        if close || response.should_close() {
+            self.show_about = false;
         }
     }
 
@@ -921,6 +971,9 @@ impl eframe::App for ScreenApp {
                     if self.tray.is_some() && ui.button("縮至系統匣").clicked() {
                         self.hide_to_tray();
                     }
+                    if ui.button("關於").clicked() {
+                        self.show_about = true;
+                    }
                     ui.label(
                         RichText::new(if self.active_shortcut.is_some() {
                             "全域快捷鍵已啟用"
@@ -981,6 +1034,7 @@ impl eframe::App for ScreenApp {
             self.preview(ui, ctx);
         });
         self.unsaved_dialog(ctx);
+        self.about_dialog(ctx);
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
