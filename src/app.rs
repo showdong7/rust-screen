@@ -20,18 +20,21 @@ use crate::{
     config::{self, CaptureMode, Settings},
     export, fonts,
     hotkey::HotkeyService,
-    platform, selector,
+    pin, platform, selector,
     single_instance::Activation,
     theme::{self, Palette},
     tray::{TrayEvent, TrayService},
+    watermark,
 };
 
 enum JobResult {
-    /// The original pixels, plus the preview prepared off the UI thread.
-    Captured(RgbaImage, egui::ColorImage, CaptureMode),
+    /// The original pixels, the preview prepared off the UI thread, and the desktop
+    /// position of the image's top-left pixel.
+    Captured(RgbaImage, egui::ColorImage, CaptureMode, [i32; 2]),
     Cancelled,
     Saved(PathBuf, Option<String>),
     Copied,
+    Pinned,
 }
 
 #[derive(Clone, Copy)]
@@ -192,7 +195,8 @@ impl ScreenApp {
 
     fn unsaved_annotations(&self) -> bool {
         self.canvas.as_ref().is_some_and(|canvas| {
-            canvas.annotations.dirty()
+            canvas.never_saved
+                || canvas.annotations.dirty()
                 || (canvas.editing && canvas.crop != canvas.annotations.document.view)
         })
     }
@@ -252,9 +256,18 @@ impl ScreenApp {
             return;
         };
         let mut choice = 0;
+        let never_saved = self
+            .canvas
+            .as_ref()
+            .is_some_and(|canvas| canvas.never_saved);
         let response = egui::Modal::new(egui::Id::new("unsaved_annotations")).show(ctx, |ui| {
-            ui.heading("尚有未儲存的標註或裁切");
-            ui.label("要先另存目前圖片，再繼續操作嗎？");
+            if never_saved {
+                ui.heading("這張截圖尚未儲存");
+                ui.label("要先儲存目前圖片，再繼續操作嗎？捨棄後將無法復原。");
+            } else {
+                ui.heading("尚有未儲存的標註或裁切");
+                ui.label("要先另存目前圖片，再繼續操作嗎？");
+            }
             if self.is_error {
                 ui.colored_label(ui.visuals().error_fg_color, &self.status);
             }
@@ -320,14 +333,51 @@ impl ScreenApp {
         let image = Arc::clone(&canvas.image);
         let document = canvas.annotations.document.clone();
         let font = self.annotation_font.clone();
+        let watermark = self.settings.watermark.clone();
         let (sender, receiver) = mpsc::channel();
         self.job = Some(receiver);
         self.message("正在合成並複製圖片…", false);
         let ctx = ctx.clone();
         thread::spawn(move || {
             let result = annotation_render::compose(&image, &document.items, &font, document.view)
+                .and_then(|image| watermark::stamp(image, &watermark, &font))
                 .and_then(|image| export::copy_image(&image))
                 .map(|()| JobResult::Copied);
+            let _ = sender.send(result);
+            ctx.request_repaint();
+        });
+    }
+
+    /// Opens the current image (with annotations, without the watermark) in a pin.
+    fn pin_capture(&mut self, ctx: &egui::Context) {
+        if self.job.is_some() {
+            return;
+        }
+        let Some(canvas) = &mut self.canvas else {
+            return;
+        };
+        canvas.annotations.finish_text();
+        let image = Arc::clone(&canvas.image);
+        let document = canvas.annotations.document.clone();
+        // Where the visible (cropped) image was on the desktop when it was captured.
+        let at = [
+            canvas.origin[0].saturating_add(document.view.x as i32),
+            canvas.origin[1].saturating_add(document.view.y as i32),
+        ];
+        let font = self.annotation_font.clone();
+        let (sender, receiver) = mpsc::channel();
+        self.job = Some(receiver);
+        self.message("正在釘選到桌面…", false);
+        let ctx = ctx.clone();
+        thread::spawn(move || {
+            let repaint = ctx.clone();
+            let result = annotation_render::compose(&image, &document.items, &font, document.view)
+                .and_then(|image| {
+                    pin::open(image.into_owned(), Some(at), move || {
+                        repaint.request_repaint()
+                    })
+                })
+                .map(|_| JobResult::Pinned);
             let _ = sender.send(result);
             ctx.request_repaint();
         });
@@ -372,20 +422,20 @@ impl ScreenApp {
                 } else {
                     platform::desktop_bounds()?
                 };
-                let image = if mode == CaptureMode::Region {
+                let (area, image) = if mode == CaptureMode::Region {
                     // The selector draws straight from the native capture bitmap and
                     // converts only the selected pixels.
-                    let Some(image) =
-                        selector::select(platform::capture_bitmap(bounds)?, bounds, fixed)?
+                    let Some(selected) =
+                        selector::select_area(platform::capture_bitmap(bounds)?, bounds, fixed)?
                     else {
                         return Ok(JobResult::Cancelled);
                     };
-                    image
+                    selected
                 } else {
-                    platform::capture(bounds)?
+                    (bounds, platform::capture(bounds)?)
                 };
                 let preview = canvas::preview_image(&image);
-                Ok(JobResult::Captured(image, preview, mode))
+                Ok(JobResult::Captured(image, preview, mode, [area.x, area.y]))
             })();
             let _ = sender.send(result);
             platform::restore_window(window, true);
@@ -417,6 +467,7 @@ impl ScreenApp {
             return;
         }
         let auto_copy = self.settings.auto_copy;
+        let watermark = self.settings.watermark.clone();
         let (sender, receiver) = mpsc::channel();
         self.job = Some(receiver);
         self.message("正在儲存 PNG…", false);
@@ -425,6 +476,7 @@ impl ScreenApp {
             let result = (|| {
                 let image =
                     annotation_render::compose(&image, &document.items, &font, document.view)?;
+                let image = watermark::stamp(image, &watermark, &font)?;
                 let (path, warning) = export::save(&image, &output_dir, auto_copy)?;
                 Ok(JobResult::Saved(path, warning))
             })();
@@ -443,19 +495,37 @@ impl ScreenApp {
         };
         self.job = None;
         match result {
-            Ok(JobResult::Captured(image, preview, mode)) => {
+            Ok(JobResult::Captured(image, preview, mode, origin)) => {
                 if mode == CaptureMode::Region && !self.settings.fixed_size {
                     self.settings.crop_width = image.width();
                     self.settings.crop_height = image.height();
                     self.settings_changed = Some(Instant::now());
                 }
-                self.canvas = Some(Canvas::new(ctx, image, preview, &self.settings));
-                self.save_capture(ctx);
+                let mut canvas = Canvas::new(ctx, image, preview, &self.settings);
+                canvas.origin = origin;
+                if self.settings.edit_before_save {
+                    // Nothing reaches the disk or clipboard until the user saves, so
+                    // sensitive areas can be masked before any copy exists.
+                    canvas.never_saved = true;
+                    let view = canvas.annotations.document.view;
+                    self.canvas = Some(canvas);
+                    self.message(
+                        format!(
+                            "已擷取 {} × {} px，尚未儲存：可標註、馬賽克或模糊後按「儲存 PNG」（Ctrl+S）",
+                            view.width, view.height
+                        ),
+                        false,
+                    );
+                } else {
+                    self.canvas = Some(canvas);
+                    self.save_capture(ctx);
+                }
             }
             Ok(JobResult::Cancelled) => self.message("已取消螢幕選取", false),
             Ok(JobResult::Saved(path, warning)) => {
                 if let Some(canvas) = &mut self.canvas {
                     canvas.annotations.saved();
+                    canvas.never_saved = false;
                 }
                 if let Some(warning) = warning {
                     self.message(
@@ -481,6 +551,10 @@ impl ScreenApp {
                 }
             }
             Ok(JobResult::Copied) => self.message("圖片（含標註）已複製到剪貼簿", false),
+            Ok(JobResult::Pinned) => self.message(
+                "已釘選到桌面：拖曳移動、滾輪縮放、Ctrl+滾輪調整透明度；雙擊或 Esc 關閉，右鍵開啟選單",
+                false,
+            ),
             Err(error) => {
                 self.pending_action = self.after_save.take();
                 self.message(error, true);
@@ -511,6 +585,9 @@ impl ScreenApp {
         }
         ui.add_space(10.0);
         let hint = match self.settings.mode {
+            CaptureMode::Region if self.settings.edit_before_save => {
+                "直接在螢幕拖曳選取，放開後進入編輯；Esc 或右鍵取消。"
+            }
             CaptureMode::Region => "直接在螢幕拖曳選取，放開即儲存；Esc 或右鍵取消。",
             CaptureMode::Desktop => "擷取所有螢幕，保留原始像素。",
             CaptureMode::Window => "快捷鍵擷取目前前景視窗；按鈕則擷取本程式隱藏後的前景視窗。",
@@ -623,6 +700,20 @@ impl ScreenApp {
         {
             self.settings_changed = Some(Instant::now());
         }
+        if ui
+            .checkbox(
+                &mut self.settings.edit_before_save,
+                "擷取後先編輯，按儲存才存檔",
+            )
+            .changed()
+        {
+            self.settings_changed = Some(Instant::now());
+        }
+        ui.label(
+            RichText::new("可先遮蔽敏感資訊；儲存前不會寫入硬碟或剪貼簿。")
+                .small()
+                .color(colors.muted),
+        );
         ui.horizontal(|ui| {
             ui.label("擷取延遲");
             if ui
@@ -642,6 +733,13 @@ impl ScreenApp {
                 .small()
                 .color(colors.muted),
         );
+
+        ui.add_space(22.0);
+        section(ui, "04", "浮水印");
+        ui.add_space(8.0);
+        if self.watermark_controls(ui) {
+            self.settings_changed = Some(Instant::now());
+        }
         ui.add_space(16.0);
         ui.separator();
         ui.label(
@@ -649,6 +747,98 @@ impl ScreenApp {
                 .small()
                 .color(colors.muted),
         );
+    }
+
+    /// Returns whether any watermark setting changed. The preview updates live.
+    fn watermark_controls(&mut self, ui: &mut egui::Ui) -> bool {
+        let colors = Palette::for_ui(ui);
+        let watermark = &mut self.settings.watermark;
+        let mut changed = ui
+            .checkbox(&mut watermark.enabled, "每張圖加上浮水印")
+            .changed();
+        ui.add_enabled_ui(watermark.enabled, |ui| {
+            changed |= ui
+                .add(
+                    egui::TextEdit::singleline(&mut watermark.text)
+                        .hint_text("浮水印文字")
+                        .char_limit(config::Watermark::TEXT_LIMIT)
+                        .desired_width(f32::INFINITY),
+                )
+                .changed();
+            egui::Grid::new("watermark_options")
+                .num_columns(2)
+                .spacing([10.0, 8.0])
+                .show(ui, |ui| {
+                    ui.label("深淺");
+                    changed |= ui
+                        .add(
+                            egui::Slider::new(
+                                &mut watermark.opacity,
+                                config::Watermark::OPACITY_RANGE,
+                            )
+                            .custom_formatter(|value, _| format!("{:.0}%", value * 100.0))
+                            .custom_parser(|text| {
+                                text.trim()
+                                    .trim_end_matches('%')
+                                    .parse::<f64>()
+                                    .ok()
+                                    .map(|value| value / 100.0)
+                            }),
+                        )
+                        .changed();
+                    ui.end_row();
+                    ui.label("角度");
+                    changed |= ui
+                        .add(
+                            egui::Slider::new(&mut watermark.angle, config::Watermark::ANGLE_RANGE)
+                                .step_by(1.0)
+                                .suffix("°"),
+                        )
+                        .changed();
+                    ui.end_row();
+                    ui.label("字級");
+                    changed |= ui
+                        .add(
+                            egui::DragValue::new(&mut watermark.font_size)
+                                .range(config::Watermark::FONT_SIZE_RANGE)
+                                .suffix(" px"),
+                        )
+                        .changed();
+                    ui.end_row();
+                    ui.label("顏色");
+                    ui.horizontal(|ui| {
+                        changed |= ui.color_edit_button_srgb(&mut watermark.color).changed();
+                        for (label, color) in [
+                            ("灰", [128, 128, 128]),
+                            ("黑", [0, 0, 0]),
+                            ("白", [255, 255, 255]),
+                        ] {
+                            if ui
+                                .selectable_label(watermark.color == color, label)
+                                .clicked()
+                            {
+                                watermark.color = color;
+                                changed = true;
+                            }
+                        }
+                    });
+                    ui.end_row();
+                });
+        });
+        ui.label(
+            RichText::new(if watermark.enabled && !watermark.active() {
+                "請輸入浮水印文字。"
+            } else {
+                "儲存與複製時加在最上層，預覽即時顯示；原始截圖不受影響。"
+            })
+            .small()
+            .color(if watermark.enabled && !watermark.active() {
+                colors.error
+            } else {
+                colors.muted
+            }),
+        );
+        changed
     }
 
     fn open_output(&mut self) {
@@ -705,11 +895,13 @@ impl ScreenApp {
                 || self.settings.annotation_width != style.width
                 || self.settings.annotation_font_size != style.font_size
                 || self.settings.annotation_filled != style.filled
+                || self.settings.annotation_strength != style.strength
             {
                 self.settings.annotation_color = color;
                 self.settings.annotation_width = style.width;
                 self.settings.annotation_font_size = style.font_size;
                 self.settings.annotation_filled = style.filled;
+                self.settings.annotation_strength = style.strength;
                 self.settings_changed = Some(Instant::now());
             }
             ui.add_space(6.0);
@@ -783,6 +975,8 @@ impl ScreenApp {
         let mut cancel = false;
         let mut copy = false;
         let mut refine = false;
+        let mut pin = false;
+        let pin_hint = "以獨立視窗固定在最上層：拖曳移動、滾輪縮放，雙擊或 Esc 關閉";
         if self.canvas.is_some() {
             ui.add_enabled_ui(!busy, |ui| {
                 ui.horizontal_wrapped(|ui| {
@@ -791,8 +985,20 @@ impl ScreenApp {
                             .button(RichText::new("儲存選取範圍  [Enter]").color(colors.accent))
                             .clicked();
                         cancel = ui.button("取消  [Esc]").clicked();
+                    } else if self.canvas.as_ref().is_some_and(|c| c.never_saved) {
+                        save = ui
+                            .button(
+                                RichText::new("儲存 PNG  [Ctrl+S]")
+                                    .strong()
+                                    .color(colors.accent),
+                            )
+                            .clicked();
+                        copy = ui.button("複製圖片").clicked();
+                        pin = ui.button("釘選到桌面").on_hover_text(pin_hint).clicked();
+                        refine = ui.button("調整範圍").clicked();
                     } else {
                         copy = ui.button("複製圖片").clicked();
+                        pin = ui.button("釘選到桌面").on_hover_text(pin_hint).clicked();
                         if ui.button("開啟儲存位置").clicked() {
                             self.open_output();
                         }
@@ -824,6 +1030,7 @@ impl ScreenApp {
                     self.settings.fixed_size,
                     available,
                     &self.annotation_font,
+                    &self.settings.watermark,
                 )
             });
             if canvas.editing
@@ -837,6 +1044,15 @@ impl ScreenApp {
             if canvas.editing && !busy && !ctx.wants_keyboard_input() {
                 save |= ctx.input(|input| input.key_pressed(egui::Key::Enter));
                 cancel |= ctx.input(|input| input.key_pressed(egui::Key::Escape));
+            }
+            // Ctrl+S saves only while there is something unsaved, so repeated presses
+            // do not write duplicate files. An open text editor is applied first.
+            if !canvas.editing
+                && !busy
+                && (canvas.never_saved || canvas.annotations.dirty())
+                && ctx.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::S))
+            {
+                save = true;
             }
         } else {
             let (rect, _) = ui.allocate_exact_size(ui.available_size(), Sense::hover());
@@ -887,6 +1103,9 @@ impl ScreenApp {
         }
         if copy {
             self.copy_capture(ctx);
+        }
+        if pin {
+            self.pin_capture(ctx);
         }
         if self.job.is_none()
             && !busy
@@ -973,6 +1192,15 @@ impl eframe::App for ScreenApp {
                     }
                     if ui.button("關於").clicked() {
                         self.show_about = true;
+                    }
+                    let pins = pin::count();
+                    if pins > 0
+                        && ui
+                            .button(format!("關閉釘選（{pins}）"))
+                            .on_hover_text("關閉所有釘選在桌面上的截圖")
+                            .clicked()
+                    {
+                        pin::close_all();
                     }
                     ui.label(
                         RichText::new(if self.active_shortcut.is_some() {

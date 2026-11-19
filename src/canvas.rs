@@ -7,7 +7,7 @@ use image::RgbaImage;
 use crate::{
     annotation::{Editor, Style},
     annotation_render, annotation_ui,
-    config::Settings,
+    config::{Settings, Watermark},
     geometry::CropRect,
     theme::Palette,
 };
@@ -30,8 +30,14 @@ pub struct Canvas {
     pub editing: bool,
     pub drag: Option<Drag>,
     pub annotations: Editor,
+    /// No copy of this capture has been written yet (edit-before-save mode).
+    pub never_saved: bool,
+    /// Desktop position of the image's top-left pixel, so a pin can open in place.
+    pub origin: [i32; 2],
     overlay: Option<TextureHandle>,
     overlay_key: Option<(u64, u32, u32, CropRect)>,
+    watermark: Option<TextureHandle>,
+    watermark_key: Option<(Watermark, u32, u32, u32)>,
 }
 
 /// Builds the (possibly downscaled) preview. Expensive for large desktops, so it
@@ -87,6 +93,7 @@ impl Canvas {
                     width: settings.annotation_width,
                     font_size: settings.annotation_font_size,
                     filled: settings.annotation_filled,
+                    strength: settings.annotation_strength,
                 },
             ),
             image: Arc::new(image),
@@ -94,9 +101,73 @@ impl Canvas {
             crop,
             editing: false,
             drag: None,
+            never_saved: false,
+            origin: [0, 0],
             overlay: None,
             overlay_key: None,
+            watermark: None,
+            watermark_key: None,
         }
+    }
+}
+
+/// Draws the enabled watermark over the preview exactly as save and copy will stamp it.
+/// The layer is rebuilt only when the settings or the preview size change.
+fn paint_watermark(
+    ui: &egui::Ui,
+    canvas: &mut Canvas,
+    rect: Rect,
+    view: CropRect,
+    watermark: &Watermark,
+    font: &ab_glyph::FontArc,
+) {
+    if !watermark.active() {
+        return;
+    }
+    let pixels_per_point = ui.ctx().pixels_per_point();
+    let width = (rect.width() * pixels_per_point).ceil().clamp(1.0, 4096.0) as u32;
+    let height = (rect.height() * pixels_per_point).ceil().clamp(1.0, 4096.0) as u32;
+    let key = (watermark.sanitized(), width, height, view.width);
+    if canvas.watermark_key.as_ref() != Some(&key) {
+        let scale = width as f32 / view.width as f32;
+        match crate::watermark::layer(watermark, font, width, height, scale) {
+            Ok(Some(pixmap)) => {
+                let image = egui::ColorImage::from_rgba_premultiplied(
+                    [width as usize, height as usize],
+                    pixmap.data(),
+                );
+                if let Some(texture) = &mut canvas.watermark {
+                    texture.set(image, egui::TextureOptions::LINEAR);
+                } else {
+                    canvas.watermark = Some(ui.ctx().load_texture(
+                        "watermark",
+                        image,
+                        egui::TextureOptions::LINEAR,
+                    ));
+                }
+            }
+            Ok(None) => canvas.watermark = None,
+            Err(error) => {
+                canvas.watermark = None;
+                ui.painter().text(
+                    rect.left_bottom(),
+                    egui::Align2::LEFT_BOTTOM,
+                    error,
+                    egui::FontId::proportional(14.0),
+                    Color32::RED,
+                );
+                return;
+            }
+        }
+        canvas.watermark_key = Some(key);
+    }
+    if let Some(texture) = &canvas.watermark {
+        ui.painter().with_clip_rect(rect).image(
+            texture.id(),
+            rect,
+            Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+            Color32::WHITE,
+        );
     }
 }
 
@@ -106,6 +177,7 @@ pub fn draw_canvas(
     fixed_size: bool,
     available: Vec2,
     font: &ab_glyph::FontArc,
+    watermark: &Watermark,
 ) {
     let colors = Palette::for_ui(ui);
     let view = if canvas.editing {
@@ -146,6 +218,8 @@ pub fn draw_canvas(
     }
     paint_annotations(ui, canvas, image_rect, view, font);
     if !canvas.editing {
+        // The crop editor shows the whole capture; the watermark follows the final crop.
+        paint_watermark(ui, canvas, image_rect, view, watermark, font);
         annotation_ui::selection(ui, &canvas.annotations, image_rect, view, font);
         return;
     }
@@ -303,7 +377,14 @@ fn paint_annotations(
     let key = (canvas.annotations.version, width, height, view);
     if canvas.overlay_key != Some(key) {
         let items = canvas.annotations.visible_items();
-        match annotation_render::overlay_premultiplied(items, font, view, width, height) {
+        match annotation_render::overlay_premultiplied(
+            items,
+            font,
+            &canvas.image,
+            view,
+            width,
+            height,
+        ) {
             Ok(pixmap) => {
                 // tiny-skia and egui both premultiply in gamma space: upload as-is.
                 let color_image = egui::ColorImage::from_rgba_premultiplied(

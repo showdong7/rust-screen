@@ -240,7 +240,7 @@ impl Bitmap {
         }
     }
 
-    #[cfg(test)]
+    /// An opaque copy of `image`, ready for GDI to draw (used by pinned screenshots).
     pub fn from_rgba(image: &RgbaImage) -> Result<Self, String> {
         let bitmap = Self::blank(image.width(), image.height())?;
         // SAFETY: no GDI drawing has used this new DIB yet; lengths match exactly.

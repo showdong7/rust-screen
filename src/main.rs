@@ -8,9 +8,11 @@ mod app;
 mod canvas;
 mod fonts;
 mod hotkey;
+mod pin;
 mod single_instance;
 mod theme;
 mod tray;
+mod watermark;
 
 // The capture core lives in the library so `rust-screen-mcp` can share it. Importing
 // the modules here keeps the GUI's existing `crate::platform::…` paths working.

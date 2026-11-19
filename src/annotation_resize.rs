@@ -193,6 +193,7 @@ mod tests {
                 width: 5.0,
                 font_size: 32.0,
                 filled: false,
+                strength: 12.0,
             },
         );
         item.end = Pos2::new(260.0, 180.0);

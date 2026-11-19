@@ -16,18 +16,40 @@ pub enum Tool {
     Ellipse,
     Arrow,
     Text,
+    /// Replaces a rectangle with averaged cells of the original pixels.
+    Mosaic,
+    /// Replaces a rectangle with a blurred copy of the original pixels.
+    Blur,
 }
 
 impl Tool {
-    pub const ALL: [(Self, &'static str); 6] = [
+    pub const ALL: [(Self, &'static str); 8] = [
         (Self::Select, "選取"),
         (Self::Line, "直線"),
         (Self::Rectangle, "方形"),
         (Self::Ellipse, "橢圓"),
         (Self::Arrow, "箭頭"),
         (Self::Text, "文字"),
+        (Self::Mosaic, "馬賽克"),
+        (Self::Blur, "模糊"),
     ];
+
+    /// Effects are drawn from the original pixels, beneath every other annotation.
+    pub fn is_effect(self) -> bool {
+        matches!(self, Self::Mosaic | Self::Blur)
+    }
+
+    /// Tools defined by a rectangle, which needs both a width and a height.
+    pub fn is_area(self) -> bool {
+        matches!(
+            self,
+            Self::Rectangle | Self::Ellipse | Self::Mosaic | Self::Blur
+        )
+    }
 }
+
+/// Mosaic cell size / blur radius limits, in original image pixels.
+pub const STRENGTH_RANGE: std::ops::RangeInclusive<f32> = 2.0..=64.0;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Style {
@@ -35,6 +57,8 @@ pub struct Style {
     pub width: f32,
     pub font_size: f32,
     pub filled: bool,
+    /// Mosaic cell size / blur radius, in original image pixels.
+    pub strength: f32,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -59,7 +83,7 @@ impl Annotation {
 
     pub fn set_end(&mut self, mut end: Pos2, square: bool, bounds: Rect) {
         end = end.clamp(bounds.min, bounds.max);
-        if square && matches!(self.tool, Tool::Rectangle | Tool::Ellipse) {
+        if square && self.tool.is_area() {
             let delta = end - self.start;
             let x_limit = if delta.x < 0.0 {
                 self.start.x - bounds.left()
@@ -136,6 +160,11 @@ impl Annotation {
     pub fn hit(&self, point: Pos2, tolerance: f32, text_size: Vec2) -> bool {
         if self.tool == Tool::Text {
             return Rect::from_min_size(self.start, text_size)
+                .expand(tolerance)
+                .contains(point);
+        }
+        if self.tool.is_effect() {
+            return Rect::from_two_pos(self.start, self.end)
                 .expand(tolerance)
                 .contains(point);
         }
@@ -323,7 +352,7 @@ impl Editor {
     pub fn finish_gesture(&mut self) {
         if let Some(item) = self.draft.take() {
             if item.start.distance(item.end) >= 1.0
-                && (!matches!(item.tool, Tool::Rectangle | Tool::Ellipse)
+                && (!item.tool.is_area()
                     || (item.end.x - item.start.x)
                         .abs()
                         .min((item.end.y - item.start.y).abs())
@@ -389,6 +418,7 @@ mod tests {
             width: 3.0,
             font_size: 28.0,
             filled: false,
+            strength: 12.0,
         }
     }
 

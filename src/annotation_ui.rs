@@ -2,7 +2,7 @@ use ab_glyph::FontArc;
 use eframe::egui::{self, Color32, Pos2, Rect, Sense, Stroke, Vec2};
 
 use crate::{
-    annotation::{Annotation, Editor, ResizeDrag, TextEdit, Tool},
+    annotation::{Annotation, Editor, ResizeDrag, STRENGTH_RANGE, TextEdit, Tool},
     annotation_render,
     annotation_resize::{self, Handle},
     geometry::CropRect,
@@ -52,64 +52,86 @@ pub fn toolbar(ui: &mut egui::Ui, editor: &mut Editor) {
             .selected
             .map(|i| editor.document.items[i].tool)
             .unwrap_or(editor.tool);
-        if matches!(shape_tool, Tool::Rectangle | Tool::Ellipse) {
-            ui.label("填色");
+        if shape_tool.is_effect() {
+            ui.label(if shape_tool == Tool::Mosaic {
+                "格子大小"
+            } else {
+                "模糊半徑"
+            });
             changed |= ui
-                .selectable_value(&mut editor.style.filled, false, "空心")
+                .add(
+                    egui::DragValue::new(&mut editor.style.strength)
+                        .range(STRENGTH_RANGE)
+                        .suffix(" px"),
+                )
                 .changed();
-            changed |= ui
-                .selectable_value(&mut editor.style.filled, true, "實心")
-                .changed();
-        }
-        ui.label("顏色");
-        changed |= ui
-            .color_edit_button_srgba(&mut editor.style.color)
-            .changed();
-        for color in [
-            Color32::from_rgb(235, 55, 55),
-            Color32::from_rgb(255, 190, 30),
-            Color32::from_rgb(40, 190, 90),
-            Color32::from_rgb(45, 130, 245),
-            Color32::WHITE,
-            Color32::BLACK,
-        ] {
-            let (rect, response) = ui.allocate_exact_size(Vec2::splat(20.0), Sense::click());
-            ui.painter().rect_filled(rect.shrink(2.0), 3.0, color);
-            ui.painter().rect_stroke(
-                rect.shrink(1.0),
-                3.0,
-                Stroke::new(
-                    if editor.style.color == color {
-                        2.0_f32
-                    } else {
-                        1.0_f32
-                    },
-                    ui.visuals().text_color(),
-                ),
-                egui::StrokeKind::Inside,
+            ui.label(
+                egui::RichText::new(
+                    "格子太小或模糊太輕，文字可能被還原；機密資料建議用實心方形覆蓋。",
+                )
+                .small()
+                .color(ui.visuals().warn_fg_color),
             );
-            if response.clicked() {
-                editor.style.color = color;
-                changed = true;
+        } else {
+            if matches!(shape_tool, Tool::Rectangle | Tool::Ellipse) {
+                ui.label("填色");
+                changed |= ui
+                    .selectable_value(&mut editor.style.filled, false, "空心")
+                    .changed();
+                changed |= ui
+                    .selectable_value(&mut editor.style.filled, true, "實心")
+                    .changed();
             }
+            ui.label("顏色");
+            changed |= ui
+                .color_edit_button_srgba(&mut editor.style.color)
+                .changed();
+            for color in [
+                Color32::from_rgb(235, 55, 55),
+                Color32::from_rgb(255, 190, 30),
+                Color32::from_rgb(40, 190, 90),
+                Color32::from_rgb(45, 130, 245),
+                Color32::WHITE,
+                Color32::BLACK,
+            ] {
+                let (rect, response) = ui.allocate_exact_size(Vec2::splat(20.0), Sense::click());
+                ui.painter().rect_filled(rect.shrink(2.0), 3.0, color);
+                ui.painter().rect_stroke(
+                    rect.shrink(1.0),
+                    3.0,
+                    Stroke::new(
+                        if editor.style.color == color {
+                            2.0_f32
+                        } else {
+                            1.0_f32
+                        },
+                        ui.visuals().text_color(),
+                    ),
+                    egui::StrokeKind::Inside,
+                );
+                if response.clicked() {
+                    editor.style.color = color;
+                    changed = true;
+                }
+            }
+            ui.label("線寬");
+            changed |= ui
+                .add_enabled(
+                    !(matches!(shape_tool, Tool::Rectangle | Tool::Ellipse) && editor.style.filled),
+                    egui::DragValue::new(&mut editor.style.width)
+                        .range(1.0..=40.0)
+                        .suffix(" px"),
+                )
+                .changed();
+            ui.label("字級");
+            changed |= ui
+                .add(
+                    egui::DragValue::new(&mut editor.style.font_size)
+                        .range(8.0..=200.0)
+                        .suffix(" px"),
+                )
+                .changed();
         }
-        ui.label("線寬");
-        changed |= ui
-            .add_enabled(
-                !(matches!(shape_tool, Tool::Rectangle | Tool::Ellipse) && editor.style.filled),
-                egui::DragValue::new(&mut editor.style.width)
-                    .range(1.0..=40.0)
-                    .suffix(" px"),
-            )
-            .changed();
-        ui.label("字級");
-        changed |= ui
-            .add(
-                egui::DragValue::new(&mut editor.style.font_size)
-                    .range(8.0..=200.0)
-                    .suffix(" px"),
-            )
-            .changed();
         if changed {
             // Only editor.style has changed so far; snapshot the document before applying
             // it, rather than cloning the whole document on every frame.
@@ -180,14 +202,20 @@ pub fn interact(
     let to_image = |position: Pos2| {
         (bounds.min + (position - image_rect.min) / scale).clamp(bounds.min, bounds.max)
     };
+    // Effects are painted beneath every other annotation, so they are hit last:
+    // clicking an arrow drawn over a mosaic selects the arrow.
     let hit = |editor: &Editor, position: Pos2| {
-        editor.document.items.iter().rposition(|item| {
-            item.hit(
-                position,
-                6.0 / scale,
-                annotation_render::bounds(item, font).size(),
-            )
-        })
+        let hits = |effects: bool| {
+            editor.document.items.iter().rposition(|item| {
+                item.tool.is_effect() == effects
+                    && item.hit(
+                        position,
+                        6.0 / scale,
+                        annotation_render::bounds(item, font).size(),
+                    )
+            })
+        };
+        hits(false).or_else(|| hits(true))
     };
     if editor.text_edit.is_none() {
         if (response.clicked() || response.double_clicked())
@@ -302,7 +330,7 @@ pub fn interact(
         if response.drag_stopped() {
             if let Some(draft) = editor.draft.take() {
                 if draft.start.distance(draft.end) * scale >= 3.0
-                    && (!matches!(draft.tool, Tool::Rectangle | Tool::Ellipse)
+                    && (!draft.tool.is_area()
                         || (draft.end.x - draft.start.x)
                             .abs()
                             .min((draft.end.y - draft.start.y).abs())
@@ -574,7 +602,14 @@ mod tests {
     #[test]
     fn mouse_drags_create_all_shapes_in_original_coordinates_after_crop() {
         let font = annotation_render::load_font();
-        for tool in [Tool::Line, Tool::Rectangle, Tool::Ellipse, Tool::Arrow] {
+        for tool in [
+            Tool::Line,
+            Tool::Rectangle,
+            Tool::Ellipse,
+            Tool::Arrow,
+            Tool::Mosaic,
+            Tool::Blur,
+        ] {
             let ctx = egui::Context::default();
             let mut editor = Editor::new(
                 1200,
@@ -584,6 +619,7 @@ mod tests {
                     width: 3.0,
                     font_size: 32.0,
                     filled: false,
+                    strength: 12.0,
                 },
             );
             editor.tool = tool;
@@ -610,6 +646,7 @@ mod tests {
             let rendered = annotation_render::overlay(
                 &editor.document.items,
                 &font,
+                &image::RgbaImage::new(1200, 800),
                 CropRect {
                     x: 100,
                     y: 200,
@@ -629,6 +666,41 @@ mod tests {
     }
 
     #[test]
+    fn clicking_an_arrow_over_a_mosaic_selects_the_arrow_and_inside_selects_the_mosaic() {
+        let font = annotation_render::load_font();
+        let ctx = egui::Context::default();
+        let style = Style {
+            color: Color32::RED,
+            width: 3.0,
+            font_size: 32.0,
+            filled: false,
+            strength: 12.0,
+        };
+        let mut editor = Editor::new(1200, 800, style);
+        let mut arrow = Annotation::new(Tool::Arrow, Pos2::new(180.0, 260.0), style);
+        arrow.end = Pos2::new(420.0, 420.0);
+        let mut mosaic = Annotation::new(Tool::Mosaic, Pos2::new(150.0, 230.0), style);
+        mosaic.end = Pos2::new(600.0, 500.0);
+        // The mosaic is later in the list, but it is painted beneath the arrow.
+        editor.document.items = vec![arrow, mosaic];
+        let click = |editor: &mut Editor, position: Pos2| {
+            frame(&ctx, editor, &font, vec![]);
+            frame(
+                &ctx,
+                editor,
+                &font,
+                vec![egui::Event::PointerMoved(position), button(position, true)],
+            );
+            frame(&ctx, editor, &font, vec![button(position, false)]);
+        };
+        // Image (180, 260) is screen (60, 80) with this test's crop and half scale.
+        click(&mut editor, Pos2::new(60.0, 80.0));
+        assert_eq!(editor.selected, Some(0));
+        click(&mut editor, Pos2::new(220.0, 140.0));
+        assert_eq!(editor.selected, Some(1));
+    }
+
+    #[test]
     fn select_drag_moves_topmost_object_and_undo_restores_it() {
         let font = annotation_render::load_font();
         let ctx = egui::Context::default();
@@ -640,6 +712,7 @@ mod tests {
                 width: 3.0,
                 font_size: 32.0,
                 filled: false,
+                strength: 12.0,
             },
         );
         let mut item = Annotation::new(Tool::Line, Pos2::new(180.0, 260.0), editor.style);
@@ -681,6 +754,7 @@ mod tests {
                 width: 3.0,
                 font_size: 32.0,
                 filled: false,
+                strength: 12.0,
             },
         );
         let mut item = Annotation::new(Tool::Rectangle, Pos2::new(180.0, 260.0), editor.style);
@@ -740,6 +814,7 @@ mod tests {
                 width: 3.0,
                 font_size: 32.0,
                 filled: false,
+                strength: 12.0,
             },
         );
         let mut item = Annotation::new(Tool::Text, Pos2::new(180.0, 260.0), editor.style);
@@ -796,6 +871,7 @@ mod tests {
                 width: 3.0,
                 font_size: 32.0,
                 filled: false,
+                strength: 12.0,
             },
         );
         let mut item = Annotation::new(Tool::Ellipse, Pos2::new(180.0, 260.0), editor.style);
@@ -855,6 +931,7 @@ mod tests {
                 width: 3.0,
                 font_size: 32.0,
                 filled: false,
+                strength: 12.0,
             },
         );
         let mut item = Annotation::new(Tool::Arrow, Pos2::new(180.0, 260.0), editor.style);
