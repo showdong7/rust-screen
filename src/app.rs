@@ -67,7 +67,7 @@ pub struct ScreenApp {
 }
 
 /// Shown in the About dialog.
-const APP_VERSION: &str = "V0.9.1 beta";
+const APP_VERSION: &str = "V0.10.0 beta";
 const WEBSITE_URL: &str = "https://rust-screen.fujin365.cc/";
 const GITHUB_URL: &str = "https://github.com/showdong7/rust-screen";
 
