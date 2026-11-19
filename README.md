@@ -2,6 +2,8 @@
 
 以 Rust 製作的 Windows 10 / 11 桌面截圖工具，介面使用 [egui / eframe](https://github.com/emilk/egui)，透過 Win32 GDI 擷取畫面。另附一個 MCP 伺服器，讓 Claude 等 AI 助理也能擷取畫面。
 
+官網：<https://rust-screen.fujin365.cc/>
+
 ## 功能
 
 - **全域快捷鍵**：預設 `Ctrl + Shift + S`，可自訂（例如 `Alt+F9`、`Ctrl+PrintScreen`）。
