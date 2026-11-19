@@ -4,6 +4,11 @@
 
 官網：<https://rust-screen.fujin365.cc/>
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshot-main-dark.png">
+  <img src="docs/screenshot-main-light.png" alt="Rust Screen 主視窗：左側為截圖模式、快捷鍵與儲存設定，右側為截圖預覽與標註工具列，預覽中的 API 金鑰與密碼已用馬賽克和模糊遮蔽" width="800">
+</picture>
+
 ## 功能
 
 - **全域快捷鍵**：預設 `Ctrl + Shift + S`，可自訂（例如 `Alt+F9`、`Ctrl+PrintScreen`）。
@@ -16,6 +21,11 @@
 - **釘選到桌面**：把截圖固定在所有視窗最上層，可拖曳移動、滾輪縮放、`Ctrl`+滾輪調整透明度，雙擊或 `Esc` 關閉。
 - **輸出**：自動命名的 PNG，不覆寫既有檔案，可同時複製到剪貼簿。
 - **系統匣常駐**、**單一執行個體**、**System／Dark／Light 主題**，設定會自動保存。
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshot-annotate-dark.png">
+  <img src="docs/screenshot-annotate-light.png" alt="截圖預覽與標註工具列：API 金鑰以馬賽克、密碼以模糊遮蔽，並加上紅框、箭頭與文字說明" width="640">
+</picture>
 
 ## 編譯與執行
 
