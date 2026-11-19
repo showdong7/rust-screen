@@ -21,23 +21,44 @@ fn main() -> eframe::Result {
         Ok(Some(instance)) => instance,
         Ok(None) => return Ok(()),
         Err(error) => {
-            let message = platform::wide(&format!("無法啟動 Rust Screen：{error}"));
-            let title = platform::wide("Rust Screen");
-            // SAFETY: both strings are NUL-terminated and remain alive during the dialog.
-            unsafe {
-                windows_sys::Win32::UI::WindowsAndMessaging::MessageBoxW(
-                    std::ptr::null_mut(),
-                    message.as_ptr(),
-                    title.as_ptr(),
-                    windows_sys::Win32::UI::WindowsAndMessaging::MB_OK
-                        | windows_sys::Win32::UI::WindowsAndMessaging::MB_ICONERROR,
-                );
-            }
+            show_startup_error(&format!("無法啟動 Rust Screen：{error}"));
             return Err(eframe::Error::AppCreation(Box::new(error)));
         }
     };
     platform::enable_dpi_awareness();
-    let options = eframe::NativeOptions {
+    let run = |renderer| {
+        let activation = instance.activation.clone();
+        eframe::run_native(
+            "Rust Screen · 螢幕截圖",
+            native_options(renderer),
+            Box::new(move |cc| Ok(Box::new(app::ScreenApp::new(cc, activation)))),
+        )
+    };
+    // OpenGL (glow) is the primary renderer. Machines without OpenGL 2.0 (server
+    // graphics such as ASPEED BMC chips, virtual display adapters, some remote
+    // sessions) fail before the app is created, so retry with wgpu on Direct3D 12,
+    // which falls back to Windows' built-in WARP software rasteriser. eframe keeps
+    // its event loop between runs, so a second `run_native` is allowed.
+    let result = match run(eframe::Renderer::Glow) {
+        Err(
+            glow_error @ (eframe::Error::OpenGL(_)
+            | eframe::Error::Glutin(_)
+            | eframe::Error::NoGlutinConfigs(..)),
+        ) => run(eframe::Renderer::Wgpu).map_err(|wgpu_error| {
+            eframe::Error::AppCreation(
+                format!("OpenGL：{glow_error}；Direct3D 12 (wgpu)：{wgpu_error}").into(),
+            )
+        }),
+        other => other,
+    };
+    if let Err(error) = &result {
+        show_startup_error(&format!("無法啟動 Rust Screen 的繪圖介面。\n\n{error}"));
+    }
+    result
+}
+
+fn native_options(renderer: eframe::Renderer) -> eframe::NativeOptions {
+    eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_inner_size([1100.0, 780.0])
             .with_min_inner_size([760.0, 600.0])
@@ -47,16 +68,23 @@ fn main() -> eframe::Result {
             )
             .with_resizable(true),
         centered: true,
+        renderer,
         ..Default::default()
-    };
-    eframe::run_native(
-        "Rust Screen · 螢幕截圖",
-        options,
-        Box::new(|cc| {
-            Ok(Box::new(app::ScreenApp::new(
-                cc,
-                instance.activation.clone(),
-            )))
-        }),
-    )
+    }
+}
+
+/// The release build has no console, so startup failures must be shown in a dialog.
+fn show_startup_error(message: &str) {
+    let message = platform::wide(message);
+    let title = platform::wide("Rust Screen");
+    // SAFETY: both strings are NUL-terminated and remain alive during the dialog.
+    unsafe {
+        windows_sys::Win32::UI::WindowsAndMessaging::MessageBoxW(
+            std::ptr::null_mut(),
+            message.as_ptr(),
+            title.as_ptr(),
+            windows_sys::Win32::UI::WindowsAndMessaging::MB_OK
+                | windows_sys::Win32::UI::WindowsAndMessaging::MB_ICONERROR,
+        );
+    }
 }

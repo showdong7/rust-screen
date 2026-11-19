@@ -20,6 +20,13 @@
 - **MSVC**：Visual Studio「使用 C++ 的桌面開發」與 Windows SDK。
 - **GNU**：MinGW-w64（`gcc.exe`、`dlltool.exe`、`windres.exe`）。`run.ps1` 會自動偵測 `C:\msys64\mingw64\bin`。
 
+沒有任何編譯工具時，可安裝 MSYS2 並加裝 gcc 與 binutils：
+
+```powershell
+winget install --id MSYS2.MSYS2 -e
+C:\msys64\usr\bin\bash.exe -lc 'pacman -S --noconfirm --needed mingw-w64-x86_64-gcc mingw-w64-x86_64-binutils'
+```
+
 ```powershell
 .\run.ps1 -Release              # 編譯並執行
 .\run.ps1 -Release -BuildOnly   # 只編譯，輸出 target\release\rust-screen.exe
@@ -84,6 +91,7 @@ Claude Desktop（`claude_desktop_config.json`）：
 ## 限制
 
 - 僅支援 Windows 10 / 11。
+- 介面預設以 OpenGL 2.0 繪製；沒有 OpenGL 2.0 的電腦（例如伺服器顯示晶片、虛擬顯示卡或部分遠端桌面）會自動改用 wgpu（Direct3D 12，必要時由 Windows WARP 以 CPU 繪製）。
 - 不包含滑鼠游標；受 DRM 保護的影片、系統安全桌面等內容可能無法擷取。
 - 視窗截圖會一併拍入遮擋在上方的其他視窗（MCP 的 `print_window` 方式除外）。
 
