@@ -6,7 +6,7 @@
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/screenshot-main-dark.png">
-  <img src="docs/screenshot-main-light.png" alt="Rust Screen 主視窗：左側為截圖模式、快捷鍵與儲存設定，右側為截圖預覽與標註工具列，預覽中的 API 金鑰與密碼已用馬賽克和模糊遮蔽" width="800">
+  <img src="docs/screenshot-main-light.png" alt="Rust Screen 主視窗：左側為儲存選項與「04 輸出尺寸與格式」（按比例縮小 50%、JPEG，顯示 1120 × 700 → 560 × 350 px），右側為截圖預覽與標註工具列，預覽中的 API 金鑰與密碼已用馬賽克和模糊遮蔽" width="800">
 </picture>
 
 ## 功能
