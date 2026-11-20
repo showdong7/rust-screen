@@ -42,6 +42,110 @@ pub struct Settings {
     /// Mosaic cell size and blur radius, in original image pixels.
     pub annotation_strength: f32,
     pub watermark: Watermark,
+    /// Size and format of saved and copied images.
+    pub export: ExportOptions,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ImageFormat {
+    #[default]
+    Png,
+    Jpeg,
+}
+
+impl ImageFormat {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Png => "PNG",
+            Self::Jpeg => "JPEG",
+        }
+    }
+
+    pub fn extension(self) -> &'static str {
+        match self {
+            Self::Png => "png",
+            Self::Jpeg => "jpg",
+        }
+    }
+}
+
+/// How saved and copied images are scaled. Every choice only ever shrinks.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OutputSize {
+    #[default]
+    Original,
+    /// Undo the display scaling of the monitor the capture came from (150 % → 2/3),
+    /// so the image is the size it looked on screen.
+    ScreenScale,
+    Percent,
+    LongEdge,
+}
+
+impl OutputSize {
+    pub const ALL: [Self; 4] = [
+        Self::Original,
+        Self::ScreenScale,
+        Self::Percent,
+        Self::LongEdge,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Original => "原始尺寸",
+            Self::ScreenScale => "依螢幕縮放還原",
+            Self::Percent => "按比例縮小",
+            Self::LongEdge => "長邊上限",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ExportOptions {
+    pub size: OutputSize,
+    /// Used by `OutputSize::Percent`.
+    pub percent: u32,
+    /// Used by `OutputSize::LongEdge`, in output pixels.
+    pub long_edge: u32,
+    pub format: ImageFormat,
+    pub jpeg_quality: u8,
+}
+
+impl ExportOptions {
+    pub const PERCENT_RANGE: std::ops::RangeInclusive<u32> = 10..=100;
+    pub const LONG_EDGE_RANGE: std::ops::RangeInclusive<u32> = 64..=16384;
+    pub const JPEG_QUALITY_RANGE: std::ops::RangeInclusive<u8> = 50..=100;
+
+    /// The options with every value inside its supported range. A hand-edited
+    /// settings file can contain anything.
+    pub fn sanitized(&self) -> Self {
+        let clamp = |value: u32, range: &std::ops::RangeInclusive<u32>| {
+            value.clamp(*range.start(), *range.end())
+        };
+        Self {
+            percent: clamp(self.percent, &Self::PERCENT_RANGE),
+            long_edge: clamp(self.long_edge, &Self::LONG_EDGE_RANGE),
+            jpeg_quality: self.jpeg_quality.clamp(
+                *Self::JPEG_QUALITY_RANGE.start(),
+                *Self::JPEG_QUALITY_RANGE.end(),
+            ),
+            ..*self
+        }
+    }
+}
+
+impl Default for ExportOptions {
+    fn default() -> Self {
+        Self {
+            size: OutputSize::Original,
+            percent: 50,
+            long_edge: 1920,
+            format: ImageFormat::Png,
+            jpeg_quality: 85,
+        }
+    }
 }
 
 /// A repeated, rotated text watermark stamped on every saved or copied image.
@@ -136,6 +240,7 @@ impl Default for Settings {
             annotation_filled: false,
             annotation_strength: 12.0,
             watermark: Watermark::default(),
+            export: ExportOptions::default(),
         }
     }
 }
@@ -184,6 +289,7 @@ pub fn load() -> Result<Settings, String> {
     } else {
         32.0
     };
+    settings.export = settings.export.sanitized();
     Ok(settings)
 }
 
@@ -214,6 +320,40 @@ mod tests {
         assert_eq!(settings.annotation_strength, 12.0);
         assert_eq!(settings.watermark, Watermark::default());
         assert!(!settings.watermark.active());
+        // Older settings files keep saving full-size PNGs.
+        assert_eq!(settings.export, ExportOptions::default());
+        assert_eq!(settings.export.size, OutputSize::Original);
+        assert_eq!(settings.export.format, ImageFormat::Png);
+    }
+
+    #[test]
+    fn export_options_survive_round_trip_and_out_of_range_values_are_clamped() {
+        let settings = Settings {
+            export: ExportOptions {
+                size: OutputSize::ScreenScale,
+                percent: 75,
+                long_edge: 1280,
+                format: ImageFormat::Jpeg,
+                jpeg_quality: 90,
+            },
+            ..Default::default()
+        };
+        let text = serde_json::to_string(&settings).unwrap();
+        assert!(text.contains(r#""size":"screen_scale""#));
+        assert!(text.contains(r#""format":"jpeg""#));
+        let restored: Settings = serde_json::from_str(&text).unwrap();
+        assert_eq!(restored.export, settings.export);
+        // A partial, hand-edited section keeps the remaining defaults.
+        let partial: Settings = serde_json::from_str(
+            r#"{"export":{"size":"percent","percent":0,"long_edge":99999,"jpeg_quality":7}}"#,
+        )
+        .unwrap();
+        let clean = partial.export.sanitized();
+        assert_eq!(clean.size, OutputSize::Percent);
+        assert_eq!(clean.percent, 10);
+        assert_eq!(clean.long_edge, 16384);
+        assert_eq!(clean.jpeg_quality, 50);
+        assert_eq!(clean.format, ImageFormat::Png);
     }
 
     #[test]

@@ -7,7 +7,7 @@ use image::RgbaImage;
 use crate::{
     annotation::{Editor, Style},
     annotation_render, annotation_ui,
-    config::{Settings, Watermark},
+    config::{ExportOptions, Settings, Watermark},
     geometry::CropRect,
     theme::Palette,
 };
@@ -34,6 +34,8 @@ pub struct Canvas {
     pub never_saved: bool,
     /// Desktop position of the image's top-left pixel, so a pin can open in place.
     pub origin: [i32; 2],
+    /// Effective DPI of the monitor the capture came from, for `OutputSize::ScreenScale`.
+    pub dpi: u32,
     overlay: Option<TextureHandle>,
     overlay_key: Option<(u64, u32, u32, CropRect)>,
     watermark: Option<TextureHandle>,
@@ -103,6 +105,7 @@ impl Canvas {
             drag: None,
             never_saved: false,
             origin: [0, 0],
+            dpi: crate::export::BASE_DPI,
             overlay: None,
             overlay_key: None,
             watermark: None,
@@ -117,7 +120,7 @@ fn paint_watermark(
     ui: &egui::Ui,
     canvas: &mut Canvas,
     rect: Rect,
-    view: CropRect,
+    output_width: u32,
     watermark: &Watermark,
     font: &ab_glyph::FontArc,
 ) {
@@ -127,9 +130,9 @@ fn paint_watermark(
     let pixels_per_point = ui.ctx().pixels_per_point();
     let width = (rect.width() * pixels_per_point).ceil().clamp(1.0, 4096.0) as u32;
     let height = (rect.height() * pixels_per_point).ceil().clamp(1.0, 4096.0) as u32;
-    let key = (watermark.sanitized(), width, height, view.width);
+    let key = (watermark.sanitized(), width, height, output_width);
     if canvas.watermark_key.as_ref() != Some(&key) {
-        let scale = width as f32 / view.width as f32;
+        let scale = width as f32 / output_width.max(1) as f32;
         match crate::watermark::layer(watermark, font, width, height, scale) {
             Ok(Some(pixmap)) => {
                 let image = egui::ColorImage::from_rgba_premultiplied(
@@ -178,6 +181,7 @@ pub fn draw_canvas(
     available: Vec2,
     font: &ab_glyph::FontArc,
     watermark: &Watermark,
+    export: &ExportOptions,
 ) {
     let colors = Palette::for_ui(ui);
     let view = if canvas.editing {
@@ -219,7 +223,10 @@ pub fn draw_canvas(
     paint_annotations(ui, canvas, image_rect, view, font);
     if !canvas.editing {
         // The crop editor shows the whole capture; the watermark follows the final crop.
-        paint_watermark(ui, canvas, image_rect, view, watermark, font);
+        // Export stamps the watermark after scaling, so its size is in output pixels.
+        let (output_width, _) =
+            crate::export::output_size(export, view.width, view.height, canvas.dpi);
+        paint_watermark(ui, canvas, image_rect, output_width, watermark, font);
         annotation_ui::selection(ui, &canvas.annotations, image_rect, view, font);
         return;
     }

@@ -16,7 +16,11 @@ use image::{
         png::{CompressionType, FilterType, PngEncoder},
     },
 };
-use rust_screen::{config, enumerate, export, geometry::DesktopRect, platform, selector};
+use rust_screen::{
+    config, enumerate, export,
+    geometry::{self, DesktopRect},
+    platform, selector,
+};
 
 use crate::indicator;
 use serde::Deserialize;
@@ -767,7 +771,8 @@ fn finish(
     }
     let mut content = Vec::with_capacity(2);
     if output.include_image {
-        let (width, height) = scaled_size(image.width(), image.height(), output.max_dimension);
+        let (width, height) =
+            geometry::fit_longest_edge(image.width(), image.height(), output.max_dimension);
         let scaled = if (width, height) == image.dimensions() {
             image
         } else {
@@ -796,16 +801,6 @@ fn finish(
     }
     content.push(json_text(&Value::Object(std::mem::take(details))));
     Ok(content)
-}
-
-fn scaled_size(width: u32, height: u32, max_dimension: u32) -> (u32, u32) {
-    let longest = width.max(height);
-    if max_dimension == 0 || longest <= max_dimension {
-        return (width, height);
-    }
-    let scale = f64::from(max_dimension) / f64::from(longest);
-    let fit = |value: u32| ((f64::from(value) * scale).round() as u32).clamp(1, max_dimension);
-    (fit(width), fit(height))
 }
 
 /// With no explicit format, returns PNG unless it exceeds `png_limit`, then JPEG.
@@ -930,15 +925,6 @@ mod tests {
             .contains("at least 1")
         );
         assert!(error(Tool::CaptureWindow, json!([1])).contains("JSON object"));
-    }
-
-    #[test]
-    fn scaling_keeps_aspect_ratio_and_never_upscales() {
-        assert_eq!(scaled_size(3840, 2160, 1568), (1568, 882));
-        assert_eq!(scaled_size(1080, 1920, 1568), (882, 1568));
-        assert_eq!(scaled_size(800, 600, 1568), (800, 600));
-        assert_eq!(scaled_size(7680, 2160, 0), (7680, 2160));
-        assert_eq!(scaled_size(10_000, 1, 100), (100, 1));
     }
 
     #[test]

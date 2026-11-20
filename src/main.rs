@@ -16,7 +16,7 @@ mod watermark;
 
 // The capture core lives in the library so `rust-screen-mcp` can share it. Importing
 // the modules here keeps the GUI's existing `crate::platform::…` paths working.
-use rust_screen::{config, export, geometry, platform, selector};
+use rust_screen::{config, enumerate, export, geometry, platform, selector};
 
 fn main() -> eframe::Result {
     let instance = match single_instance::SingleInstance::acquire() {

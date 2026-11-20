@@ -52,9 +52,30 @@ impl CropRect {
     }
 }
 
+/// The size that fits `width` × `height` inside a `max_edge` square, keeping the
+/// aspect ratio. Never upscales; 0 means no limit.
+pub fn fit_longest_edge(width: u32, height: u32, max_edge: u32) -> (u32, u32) {
+    let longest = width.max(height);
+    if max_edge == 0 || longest <= max_edge {
+        return (width, height);
+    }
+    let scale = f64::from(max_edge) / f64::from(longest);
+    let fit = |value: u32| ((f64::from(value) * scale).round() as u32).clamp(1, max_edge);
+    (fit(width), fit(height))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn longest_edge_fit_keeps_aspect_ratio_and_never_upscales() {
+        assert_eq!(fit_longest_edge(3840, 2160, 1568), (1568, 882));
+        assert_eq!(fit_longest_edge(1080, 1920, 1568), (882, 1568));
+        assert_eq!(fit_longest_edge(800, 600, 1568), (800, 600));
+        assert_eq!(fit_longest_edge(7680, 2160, 0), (7680, 2160));
+        assert_eq!(fit_longest_edge(10_000, 1, 100), (100, 1));
+    }
 
     #[test]
     fn intersects_negative_monitor_and_offscreen_window() {

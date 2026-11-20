@@ -126,6 +126,22 @@ pub fn monitors() -> Result<Vec<Monitor>, String> {
     Ok(monitors)
 }
 
+/// Effective DPI of the monitor that shows most of `area` (96 when none does). A
+/// capture spanning monitors with different scaling follows the one it mostly covers.
+pub fn dpi_for(monitors: &[Monitor], area: DesktopRect) -> u32 {
+    monitors
+        .iter()
+        .filter_map(|monitor| {
+            let shared = monitor.bounds.intersection(area)?;
+            Some((
+                u64::from(shared.width) * u64::from(shared.height),
+                monitor.dpi,
+            ))
+        })
+        .max_by_key(|(covered, _)| *covered)
+        .map_or(96, |(_, dpi)| dpi)
+}
+
 /// The visible frame of a window, falling back to GetWindowRect when DWM has none.
 pub fn frame_bounds(handle: usize) -> Option<DesktopRect> {
     let hwnd = handle as HWND;
@@ -289,6 +305,40 @@ mod tests {
             }),
             None
         );
+    }
+
+    #[test]
+    fn capture_dpi_follows_the_monitor_it_mostly_covers() {
+        let monitor = |x: i32, dpi: u32| Monitor {
+            name: String::new(),
+            bounds: DesktopRect {
+                x,
+                y: 0,
+                width: 1920,
+                height: 1080,
+            },
+            work_area: DesktopRect {
+                x,
+                y: 0,
+                width: 1920,
+                height: 1040,
+            },
+            primary: x == 0,
+            dpi,
+        };
+        let monitors = [monitor(-1920, 96), monitor(0, 144)];
+        let area = |x: i32, width: u32| DesktopRect {
+            x,
+            y: 100,
+            width,
+            height: 400,
+        };
+        assert_eq!(dpi_for(&monitors, area(100, 500)), 144);
+        assert_eq!(dpi_for(&monitors, area(-1000, 500)), 96);
+        // Mostly on the left (100 %) monitor.
+        assert_eq!(dpi_for(&monitors, area(-600, 700)), 96);
+        // Off every monitor.
+        assert_eq!(dpi_for(&monitors, area(5000, 100)), 96);
     }
 
     #[test]

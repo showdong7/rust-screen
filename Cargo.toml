@@ -1,6 +1,6 @@
 [package]
 name = "rust-screen"
-version = "0.10.0-beta"
+version = "0.11.0-beta"
 edition = "2024"
 rust-version = "1.88"
 description = "Windows screen capture with configurable global shortcuts"

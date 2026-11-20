@@ -17,8 +17,8 @@ use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use crate::{
     annotation_render, annotation_ui,
     canvas::{self, Canvas},
-    config::{self, CaptureMode, Settings},
-    export, fonts,
+    config::{self, CaptureMode, ImageFormat, OutputSize, Settings},
+    enumerate, export, fonts,
     hotkey::HotkeyService,
     pin, platform, selector,
     single_instance::Activation,
@@ -28,9 +28,9 @@ use crate::{
 };
 
 enum JobResult {
-    /// The original pixels, the preview prepared off the UI thread, and the desktop
-    /// position of the image's top-left pixel.
-    Captured(RgbaImage, egui::ColorImage, CaptureMode, [i32; 2]),
+    /// The original pixels, the preview prepared off the UI thread, the desktop
+    /// position of the image's top-left pixel and the DPI of the monitor it came from.
+    Captured(RgbaImage, egui::ColorImage, CaptureMode, [i32; 2], u32),
     Cancelled,
     Saved(PathBuf, Option<String>),
     Copied,
@@ -67,7 +67,7 @@ pub struct ScreenApp {
 }
 
 /// Shown in the About dialog.
-const APP_VERSION: &str = "V0.10.0 beta";
+const APP_VERSION: &str = "V0.11.0 beta";
 const WEBSITE_URL: &str = "https://rust-screen.fujin365.cc/";
 const GITHUB_URL: &str = "https://github.com/showdong7/rust-screen";
 
@@ -334,12 +334,17 @@ impl ScreenApp {
         let document = canvas.annotations.document.clone();
         let font = self.annotation_font.clone();
         let watermark = self.settings.watermark.clone();
+        let options = self.settings.export.sanitized();
+        let dpi = canvas.dpi;
         let (sender, receiver) = mpsc::channel();
         self.job = Some(receiver);
         self.message("正在合成並複製圖片…", false);
         let ctx = ctx.clone();
         thread::spawn(move || {
+            // The clipboard gets the same output size as saved files: pasting into
+            // mail or documents is the main reason to shrink.
             let result = annotation_render::compose(&image, &document.items, &font, document.view)
+                .map(|image| export::resize(image, &options, dpi))
                 .and_then(|image| watermark::stamp(image, &watermark, &font))
                 .and_then(|image| export::copy_image(&image))
                 .map(|()| JobResult::Copied);
@@ -435,7 +440,16 @@ impl ScreenApp {
                     (bounds, platform::capture(bounds)?)
                 };
                 let preview = canvas::preview_image(&image);
-                Ok(JobResult::Captured(image, preview, mode, [area.x, area.y]))
+                let dpi = enumerate::monitors()
+                    .map(|monitors| enumerate::dpi_for(&monitors, area))
+                    .unwrap_or(export::BASE_DPI);
+                Ok(JobResult::Captured(
+                    image,
+                    preview,
+                    mode,
+                    [area.x, area.y],
+                    dpi,
+                ))
             })();
             let _ = sender.send(result);
             platform::restore_window(window, true);
@@ -468,16 +482,26 @@ impl ScreenApp {
         }
         let auto_copy = self.settings.auto_copy;
         let watermark = self.settings.watermark.clone();
+        let options = self.settings.export.sanitized();
+        let dpi = canvas.dpi;
         let (sender, receiver) = mpsc::channel();
         self.job = Some(receiver);
-        self.message("正在儲存 PNG…", false);
+        self.message(format!("正在儲存 {}…", options.format.label()), false);
         let ctx = ctx.clone();
         thread::spawn(move || {
             let result = (|| {
                 let image =
                     annotation_render::compose(&image, &document.items, &font, document.view)?;
+                // Scale before the watermark so its font size stays in output pixels.
+                let image = export::resize(image, &options, dpi);
                 let image = watermark::stamp(image, &watermark, &font)?;
-                let (path, warning) = export::save(&image, &output_dir, auto_copy)?;
+                let (path, warning) = export::save_as(
+                    &image,
+                    &output_dir,
+                    auto_copy,
+                    options.format,
+                    options.jpeg_quality,
+                )?;
                 Ok(JobResult::Saved(path, warning))
             })();
             let _ = sender.send(result);
@@ -495,7 +519,7 @@ impl ScreenApp {
         };
         self.job = None;
         match result {
-            Ok(JobResult::Captured(image, preview, mode, origin)) => {
+            Ok(JobResult::Captured(image, preview, mode, origin, dpi)) => {
                 if mode == CaptureMode::Region && !self.settings.fixed_size {
                     self.settings.crop_width = image.width();
                     self.settings.crop_height = image.height();
@@ -503,6 +527,7 @@ impl ScreenApp {
                 }
                 let mut canvas = Canvas::new(ctx, image, preview, &self.settings);
                 canvas.origin = origin;
+                canvas.dpi = dpi;
                 if self.settings.edit_before_save {
                     // Nothing reaches the disk or clipboard until the user saves, so
                     // sensitive areas can be masked before any copy exists.
@@ -511,8 +536,10 @@ impl ScreenApp {
                     self.canvas = Some(canvas);
                     self.message(
                         format!(
-                            "已擷取 {} × {} px，尚未儲存：可標註、馬賽克或模糊後按「儲存 PNG」（Ctrl+S）",
-                            view.width, view.height
+                            "已擷取 {} × {} px，尚未儲存：可標註、馬賽克或模糊後按「儲存 {}」（Ctrl+S）",
+                            view.width,
+                            view.height,
+                            self.settings.export.format.label()
                         ),
                         false,
                     );
@@ -676,7 +703,7 @@ impl ScreenApp {
         ui.add_space(22.0);
         section(ui, "03", "儲存與選項");
         ui.add_space(8.0);
-        ui.label("PNG 儲存資料夾");
+        ui.label("圖片儲存資料夾");
         if ui
             .add(egui::TextEdit::singleline(&mut self.output_input).desired_width(f32::INFINITY))
             .changed()
@@ -735,7 +762,14 @@ impl ScreenApp {
         );
 
         ui.add_space(22.0);
-        section(ui, "04", "浮水印");
+        section(ui, "04", "輸出尺寸與格式");
+        ui.add_space(8.0);
+        if self.export_controls(ui) {
+            self.settings_changed = Some(Instant::now());
+        }
+
+        ui.add_space(22.0);
+        section(ui, "05", "浮水印");
         ui.add_space(8.0);
         if self.watermark_controls(ui) {
             self.settings_changed = Some(Instant::now());
@@ -743,10 +777,152 @@ impl ScreenApp {
         ui.add_space(16.0);
         ui.separator();
         ui.label(
-            RichText::new("WINDOWS 10 / 11   ·   PNG")
+            RichText::new("WINDOWS 10 / 11   ·   PNG / JPEG")
                 .small()
                 .color(colors.muted),
         );
+    }
+
+    /// Returns whether any output size or format setting changed.
+    fn export_controls(&mut self, ui: &mut egui::Ui) -> bool {
+        let colors = Palette::for_ui(ui);
+        // The final crop of the open capture, to show what the settings produce.
+        let current = self.canvas.as_ref().map(|canvas| {
+            let view = if canvas.editing {
+                canvas.crop
+            } else {
+                canvas.annotations.document.view
+            };
+            (view.width, view.height, canvas.dpi)
+        });
+        let options = &mut self.settings.export;
+        let mut changed = false;
+        egui::Grid::new("export_options")
+            .num_columns(2)
+            .spacing([10.0, 8.0])
+            .show(ui, |ui| {
+                ui.label("尺寸");
+                egui::ComboBox::from_id_salt("output_size")
+                    .selected_text(options.size.label())
+                    .show_ui(ui, |ui| {
+                        for size in OutputSize::ALL {
+                            changed |= ui
+                                .selectable_value(&mut options.size, size, size.label())
+                                .changed();
+                        }
+                    });
+                ui.end_row();
+                match options.size {
+                    OutputSize::Percent => {
+                        ui.label("比例");
+                        ui.horizontal(|ui| {
+                            changed |= ui
+                                .add(
+                                    egui::DragValue::new(&mut options.percent)
+                                        .range(config::ExportOptions::PERCENT_RANGE)
+                                        .suffix(" %"),
+                                )
+                                .changed();
+                            for preset in [75, 50] {
+                                if ui
+                                    .selectable_label(
+                                        options.percent == preset,
+                                        format!("{preset}%"),
+                                    )
+                                    .clicked()
+                                {
+                                    options.percent = preset;
+                                    changed = true;
+                                }
+                            }
+                        });
+                        ui.end_row();
+                    }
+                    OutputSize::LongEdge => {
+                        ui.label("長邊");
+                        ui.horizontal(|ui| {
+                            changed |= ui
+                                .add(
+                                    egui::DragValue::new(&mut options.long_edge)
+                                        .range(config::ExportOptions::LONG_EDGE_RANGE)
+                                        .speed(10)
+                                        .suffix(" px"),
+                                )
+                                .changed();
+                            for preset in [1920, 1280] {
+                                if ui
+                                    .selectable_label(
+                                        options.long_edge == preset,
+                                        preset.to_string(),
+                                    )
+                                    .clicked()
+                                {
+                                    options.long_edge = preset;
+                                    changed = true;
+                                }
+                            }
+                        });
+                        ui.end_row();
+                    }
+                    OutputSize::Original | OutputSize::ScreenScale => {}
+                }
+                ui.label("格式");
+                ui.horizontal(|ui| {
+                    for format in [ImageFormat::Png, ImageFormat::Jpeg] {
+                        changed |= ui
+                            .selectable_value(&mut options.format, format, format.label())
+                            .changed();
+                    }
+                });
+                ui.end_row();
+                if options.format == ImageFormat::Jpeg {
+                    ui.label("品質");
+                    changed |= ui
+                        .add(egui::Slider::new(
+                            &mut options.jpeg_quality,
+                            config::ExportOptions::JPEG_QUALITY_RANGE,
+                        ))
+                        .changed();
+                    ui.end_row();
+                }
+            });
+        let size_hint = match current {
+            Some((width, height, dpi)) => {
+                let (out_width, out_height) = export::output_size(options, width, height, dpi);
+                let screen = if options.size == OutputSize::ScreenScale {
+                    format!("（螢幕縮放 {}%）", dpi * 100 / export::BASE_DPI)
+                } else {
+                    String::new()
+                };
+                if (out_width, out_height) == (width, height) {
+                    format!("目前截圖輸出 {width} × {height} px，維持原尺寸{screen}。")
+                } else {
+                    format!("目前截圖：{width} × {height} → {out_width} × {out_height} px{screen}")
+                }
+            }
+            None => match options.size {
+                OutputSize::Original => "保留原始像素。".into(),
+                OutputSize::ScreenScale => {
+                    "依截圖所在螢幕的縮放還原（150% 時縮成 2/3），與畫面上看到的大小相同；100% 不變。"
+                        .into()
+                }
+                OutputSize::Percent => format!("等比例縮小為 {}%。", options.percent),
+                OutputSize::LongEdge => {
+                    format!("長邊超過 {} px 時等比例縮小，不會放大。", options.long_edge)
+                }
+            },
+        };
+        ui.label(RichText::new(size_hint).small().color(colors.muted));
+        ui.label(
+            RichText::new(if options.format == ImageFormat::Jpeg {
+                "JPEG 檔案較小，適合 email；細字與線條邊緣可能出現些微雜點。儲存與複製都會套用。"
+            } else {
+                "儲存與複製到剪貼簿都會套用；釘選與編輯中的原始截圖不受影響。"
+            })
+            .small()
+            .color(colors.muted),
+        );
+        changed
     }
 
     /// Returns whether any watermark setting changed. The preview updates live.
@@ -977,6 +1153,7 @@ impl ScreenApp {
         let mut refine = false;
         let mut pin = false;
         let pin_hint = "以獨立視窗固定在最上層：拖曳移動、滾輪縮放，雙擊或 Esc 關閉";
+        let format_label = self.settings.export.format.label();
         if self.canvas.is_some() {
             ui.add_enabled_ui(!busy, |ui| {
                 ui.horizontal_wrapped(|ui| {
@@ -988,7 +1165,7 @@ impl ScreenApp {
                     } else if self.canvas.as_ref().is_some_and(|c| c.never_saved) {
                         save = ui
                             .button(
-                                RichText::new("儲存 PNG  [Ctrl+S]")
+                                RichText::new(format!("儲存 {}  [Ctrl+S]", format_label))
                                     .strong()
                                     .color(colors.accent),
                             )
@@ -1009,9 +1186,9 @@ impl ScreenApp {
                                     .as_ref()
                                     .is_some_and(|c| !c.annotations.document.items.is_empty())
                                 {
-                                    "另存標註 PNG"
+                                    format!("另存標註 {format_label}")
                                 } else {
-                                    "另存一份 PNG"
+                                    format!("另存一份 {format_label}")
                                 },
                             )
                             .clicked();
@@ -1031,6 +1208,7 @@ impl ScreenApp {
                     available,
                     &self.annotation_font,
                     &self.settings.watermark,
+                    &self.settings.export,
                 )
             });
             if canvas.editing
